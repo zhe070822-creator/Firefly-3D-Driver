@@ -1,532 +1,238 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { ThreeMmdLoader } from '@yohawing/three-mmd-loader';
 
-// ── Scene setup ──────────────────────────────────────────────
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf5f5f5);
+scene.background = new THREE.Color(0x1a1a2e);
 
 const camera = new THREE.PerspectiveCamera(45, 2, 0.1, 100);
-let camTarget = new THREE.Vector3(0, 1.0, 0);
-const camOffset = new THREE.Vector3(-0.18, 0.3, 3.5);
-camera.position.copy(camTarget).add(camOffset);
-camera.lookAt(camTarget);
+camera.position.set(0, 2.5, 5);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(1); // force 1:1 to avoid DPI canvas sizing issues
+renderer.setPixelRatio(1);
 renderer.shadowMap.enabled = true;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
+renderer.toneMappingExposure = 0.35;
 document.getElementById('viewer').appendChild(renderer.domElement);
-renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
-renderer.domElement.addEventListener('mousedown', (e) => { if (e.button === 2) e.preventDefault(); });
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.copy(camTarget);
+controls.target.set(0, 2.0, 0);
 controls.enableDamping = true;
-controls.dampingFactor = 0.1;
-controls.minDistance = 0.3;
-controls.maxDistance = 8;
-controls.maxPolarAngle = Math.PI * 0.85;
-controls.enablePan = true;
-controls.panSpeed = 0.8;
-controls.mouseButtons = {
-  LEFT: THREE.MOUSE.ROTATE,
-  MIDDLE: THREE.MOUSE.PAN,
-  RIGHT: null // disabled, conflicts with browser gesture
-};
+controls.maxDistance = 60;
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: null };
 controls.update();
 
-// ── Fly controls ──────────────────────────────────────────────
+// Lights
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+const key = new THREE.DirectionalLight(0xffffff, 3.0);
+key.position.set(5, 15, 10); scene.add(key);
+const fill = new THREE.DirectionalLight(0x6688cc, 1.5);
+fill.position.set(-5, 2, -5); scene.add(fill);
+scene.add(new THREE.GridHelper(10, 30, 0x334466, 0x1a1a3e));
+
+// State
+const loader = new ThreeMmdLoader();
+const boneMap = new Map();
+const boneDefaults = new Map();
+let mmdModel = null;
+
+// Fly controls
 const flyControls = new PointerLockControls(camera, renderer.domElement);
-let flyMode = false;
-let flySpeedMul = 1.0;
+let flyMode = false, flySpeedMul = 1.0, flyReady = false;
 const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false };
 const flyClock = new THREE.Clock();
 
-function enableFly() {
-  controls.enabled = false;
-  flyControls.enabled = true;
-  flyControls.lock();
-}
-
-function disableFly() {
-  flyMode = false;
-  flyControls.enabled = false;
-  flyControls.unlock();
-  controls.enabled = true;
-  document.getElementById('flyBtn').textContent = '飞行模式';
-}
-
-flyControls.addEventListener('lock', () => {
-  flyMode = true;
-  document.getElementById('flyBtn').textContent = '飞行中 (ESC退出)';
-  console.log('[Fly] 已锁定 | WASD移动 | 鼠标转向 | Shift加速 | Q/E升降 | ESC退出');
-});
-flyControls.addEventListener('unlock', () => {
-  if (flyMode) disableFly();
-});
-
-// Keyboard controls
-document.addEventListener('keydown', (e) => {
+function enableFly() { controls.enabled = false; flyControls.enabled = true; flyControls.lock(); }
+function disableFly() { flyMode = false; flyControls.enabled = false; flyControls.unlock(); controls.enabled = true; document.getElementById('flyBtn').textContent = '飞行模式'; }
+flyControls.addEventListener('lock', () => { flyMode = true; document.getElementById('flyBtn').textContent = '飞行中 (ESC退出)'; });
+flyControls.addEventListener('unlock', () => { if (flyMode) disableFly(); });
+document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
-  if (k === 'f' && !flyMode && !flyReady) {
-    e.preventDefault();
-    flyReady = true;
-    document.getElementById('flyBtn').textContent = '点击画面进入飞行...';
-    return;
-  }
+  if (k === 'f' && !flyMode && !flyReady) { e.preventDefault(); flyReady = true; document.getElementById('flyBtn').textContent = '点击画面进入飞行...'; return; }
   if (flyMode && k in keys) { keys[k] = true; e.preventDefault(); }
 });
-document.addEventListener('keyup', (e) => {
-  const k = e.key.toLowerCase();
-  if (k in keys) { keys[k] = false; e.preventDefault(); }
-});
+document.addEventListener('keyup', e => { if (e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = false; });
+renderer.domElement.addEventListener('click', () => { if (flyReady && !flyMode) { flyReady = false; enableFly(); } });
 
-// ── Animation ──────────────────────────────────────────────────
-let animating = false;
-let animTime = 0;
+// Load PMX directly
+(async () => {
+  try {
+    mmdModel = await loader.loadModel('/Firefly/猫耳流萤_by_鮮淉橙/猫耳流萤.pmx');
+    mmdModel.root.scale.setScalar(0.2);
+    mmdModel.root.position.set(0, 0, 0);
+    scene.add(mmdModel.root);
 
-function toggleAnim() {
-  animating = !animating;
-  animTime = 0;
-  const btn = document.getElementById('animBtn');
-  btn.textContent = animating ? '停止动画' : '播放动画';
-  if (animating) {
-    // Set base pose for wave
-    const pose = (n, x, y, z) => {
-      const b = boneMap.get(n);
-      if (b) { if (x != null) b.rotation.x = x; if (y != null) b.rotation.y = y; if (z != null) b.rotation.z = z; }
-    };
-    pose('Left_shoulder_083', 0.6, -0.3, -0.8);
-    pose('Left_elbow_086', 0.4, 0, 0.6);
-    pose('Left_wrist_088', 0, 2.0, 0);
-    pose('Head_08', 0, -0.2, 0);
-    // 右手贴身（默认+滑条偏移）
-    const rsDef = boneDefaults.get('Right_shoulder_058');
-    const rwDef = boneDefaults.get('Right_wrist_063');
-    if (rsDef) { const b = boneMap.get('Right_shoulder_058'); if (b) b.rotation.y = rsDef.y - 0.524; }
-    if (rwDef) { const b = boneMap.get('Right_wrist_063'); if (b) b.rotation.x = rwDef.x - 0.297; }
-  } else {
-    // Reset on stop
-    boneDefaults.forEach((d, n) => { const b = boneMap.get(n); if (b) b.rotation.set(d.x, d.y, d.z); });
-  }
-}
-
-// Click canvas to lock when in fly-ready state
-let flyReady = false;
-renderer.domElement.addEventListener('click', () => {
-  if (flyReady && !flyMode) {
-    flyReady = false;
-    enableFly();
-  }
-});
-
-// ── Lighting ─────────────────────────────────────────────────
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
-scene.add(ambientLight);
-const key = new THREE.DirectionalLight(0xffffff, 1.5);
-key.position.set(5, 8, 5);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0x8899cc, 0.5);
-fill.position.set(-3, 2, -3);
-scene.add(fill);
-const rim = new THREE.DirectionalLight(0xffccaa, 0.8);
-rim.position.set(0, 0.5, -5);
-scene.add(rim);
-
-// Grid floor
-const grid = new THREE.GridHelper(6, 20, 0xcccccc, 0xe8e8e8);
-grid.position.y = -0.01;
-scene.add(grid);
-
-// ── State ────────────────────────────────────────────────────
-let modelGroup = null;
-let skeleton = null;
-const boneMap = new Map();        // name → THREE.Bone
-const boneDefaults = new Map();   // name → { rotation: Euler }
-const skeletonHelperGroup = new THREE.Group();
-scene.add(skeletonHelperGroup);
-
-// ── GLTF Loader ──────────────────────────────────────────────
-const loader = new GLTFLoader();
-loader.load(
-  '/SilverWolf/scene.gltf',
-  (gltf) => {
-    modelGroup = gltf.scene;
-
-    // Center model in world space
-    scene.add(modelGroup);
-    modelGroup.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(modelGroup);
-    const center = box.getCenter(new THREE.Vector3());
-    const size = box.getSize(new THREE.Vector3());
-    console.log(`[SilverWolf] BBox center: ${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)}`);
-    console.log(`[SilverWolf] BBox size: ${size.x.toFixed(3)}, ${size.y.toFixed(3)}, ${size.z.toFixed(3)}`);
-
-    modelGroup.position.set(-center.x, -box.min.y, -center.z);
-    camTarget.set(0, (box.max.y - box.min.y) / 2, 0);
-    controls.target.copy(camTarget);
-    camera.position.copy(camTarget).add(camOffset);
-    controls.update();
-    // Convert unlit materials to standard (responds to lighting)
-    gltf.scene.traverse((child) => {
-      if (child.isMesh && child.material) {
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        mats.forEach((mat, i) => {
-          if (mat.isMeshBasicMaterial && !mat.userData._converted) {
-            const newMat = new THREE.MeshStandardMaterial({
-              map: mat.map,
-              color: mat.color || new THREE.Color(1, 1, 1),
-              roughness: 0.7,
-              metalness: 0.0,
-            });
-            newMat.userData._converted = true;
-            if (Array.isArray(child.material)) child.material[i] = newMat;
-            else child.material = newMat;
-          }
-        });
+    mmdModel.root.traverse(c => {
+      if (c.isBone && !boneMap.has(c.name)) {
+        boneMap.set(c.name, c);
+        boneDefaults.set(c.name, { x: c.rotation.x, y: c.rotation.y, z: c.rotation.z });
       }
     });
-    console.log('[SilverWolf] Materials converted to Standard');
 
-    // Enable shadows on model
-    modelGroup.traverse(c => {
-      if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
-    });
-
-    // Load weapon
-    loader.load('/SilverWolf/weapon/weapon.gltf', (weaponGltf) => {
-      const weapon = weaponGltf.scene;
-      weapon.scale.set(0.08, 0.08, 0.08);
-      // Convert to standard material
-      weapon.traverse(c => {
-        if (c.isMesh && c.material) {
-          const mats = Array.isArray(c.material) ? c.material : [c.material];
-          mats.forEach((mat, i) => {
-            if (mat.isMeshBasicMaterial) {
-              const nm = new THREE.MeshStandardMaterial({
-                map: mat.map, color: mat.color || new THREE.Color(1,1,1),
-                roughness: 0.5, metalness: 0.3
-              });
-              if (Array.isArray(c.material)) c.material[i] = nm;
-              else c.material = nm;
-            }
-          });
-        }
-        if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; }
-      });
-      // Attach to right hand
-      const rightHand = boneMap.get('Right_wrist_063');
-      if (rightHand) {
-        rightHand.add(weapon);
-        weapon.position.set(0, -0.05, 0.05);
-      } else {
-        weapon.position.set(0.3, 0.8, 0.2);
-        modelGroup.add(weapon);
+    // Log material types
+    mmdModel.root.traverse(function(c) {
+      if (c.isMesh && c.material) {
+        var m = Array.isArray(c.material) ? c.material[0] : c.material;
+        console.log('[Mat] type:', m.type, 'hasMap:', !!m.map, 'hasEmissive:', !!m.emissiveMap, 'uniforms:', !!m.uniforms);
       }
-      console.log('[SilverWolf] Weapon attached');
     });
-
-    window.__modelGroup = modelGroup;
-    window.__camera = camera;
-    window.__controls = controls;
-    window.__camTarget = camTarget;
-    window.__camOffset = camOffset;
+    console.log('[流萤] Bones:', boneMap.size);
+        console.log('[流萤] Bones:', boneMap.size);
     window.__bones = boneMap;
-    window.__pose = (name, x, y, z) => {
-      const b = boneMap.get(name);
-      if (b) { if (x != null) b.rotation.x = x; if (y != null) b.rotation.y = y; if (z != null) b.rotation.z = z; }
-    };
     window.__resetPose = () => boneDefaults.forEach((d, n) => { const b = boneMap.get(n); if (b) b.rotation.set(d.x, d.y, d.z); });
 
-    // Extract skeleton from SkinnedMesh
-    gltf.scene.traverse((child) => {
-      if (child.isSkinnedMesh && child.skeleton) {
-        skeleton = child.skeleton;
-        // Collect all bones
-        skeleton.bones.forEach((bone) => {
-          boneMap.set(bone.name, bone);
-          boneDefaults.set(bone.name, {
-            x: bone.rotation.x,
-            y: bone.rotation.y,
-            z: bone.rotation.z,
-          });
-        });
-      }
-    });
-
-    if (skeleton) {
-      console.log(`[SilverWolf] Loaded skeleton with ${skeleton.bones.length} bones`);
-      buildBoneHelper();
-      buildUI();
-    }
-
-    document.getElementById('info').textContent =
-      `骨骼数: ${boneMap.size} | 左键旋转 | 中键平移 | 滚轮缩放`;
-
-    const resetCamBtn = document.getElementById('resetCamBtn');
-    resetCamBtn.style.display = '';
-    resetCamBtn.onclick = () => {
-      controls.target.copy(camTarget);
-      camera.position.copy(camTarget).add(camOffset);
-      controls.update();
-    };
-
-    // Panel toggle
-    const toggleBtn = document.getElementById('toggleBtn');
-    const panel = document.getElementById('panel');
-    toggleBtn.style.display = '';
-    toggleBtn.textContent = '☰';
-    toggleBtn.title = '打开骨骼控制面板';
-
-    // Fly mode button
-    const flyBtn = document.getElementById('flyBtn');
-    flyBtn.style.display = '';
-    flyBtn.onclick = () => {
-      if (flyMode) { disableFly(); return; }
-      flyReady = !flyReady;
-      flyBtn.textContent = flyReady ? '点击画面进入飞行...' : '飞行模式';
-    };
-
-    // Fly speed slider
-    const flySpeedDiv = document.getElementById('flySpeed');
-    const flySpeedSlider = document.getElementById('flySpeedSlider');
-    const flySpeedVal = document.getElementById('flySpeedVal');
-    flySpeedDiv.style.display = '';
-    flySpeedSlider.oninput = () => {
-      flySpeedMul = parseFloat(flySpeedSlider.value);
-      flySpeedVal.textContent = flySpeedMul.toFixed(1);
-    };
-
-    // Animation button
-    const animBtn = document.getElementById('animBtn');
-    animBtn.style.display = '';
-    animBtn.onclick = toggleAnim;
-
-    toggleBtn.onclick = () => {
-      const visible = panel.classList.toggle("visible");
-      toggleBtn.textContent = visible ? "✕" : "☰";
-      toggleBtn.title = visible ? "关闭骨骼控制面板" : "打开骨骼控制面板";
-      // Resize renderer after panel show/hide
-    };
-  },
-  (progress) => {
-    const pct = progress.total ? Math.round(progress.loaded / progress.total * 100) : 0;
-    document.getElementById('info').textContent = `加载中... ${pct}%`;
-  },
-  (err) => {
+    buildUI();
+    document.getElementById('info').textContent = '流萤 ' + boneMap.size + '骨骼 | PMX直读';
+    document.getElementById('leftPanel').style.display = '';
+    document.getElementById('toggleBtn').style.display = '';
+  } catch (err) {
     document.getElementById('info').textContent = '加载失败: ' + err.message;
     console.error(err);
   }
-);
+})();
 
-// ── Skeleton visualizer ──────────────────────────────────────
-function buildBoneHelper() {
-  skeletonHelperGroup.clear();
-  if (!skeleton) return;
-
-  const boneMat = new THREE.MeshBasicMaterial({ color: 0xe94560, depthTest: false });
-  const boneGeo = new THREE.SphereGeometry(0.008, 6, 6);
-  const lineMat = new THREE.LineBasicMaterial({ color: 0xcc3355, transparent: true, opacity: 0.6, depthTest: false });
-
-  skeleton.bones.forEach((bone) => {
-    if (!bone.parent || !skeleton.bones.includes(bone.parent)) return;
-    const worldPos = new THREE.Vector3();
-    const parentWorldPos = new THREE.Vector3();
-    bone.getWorldPosition(worldPos);
-    bone.parent.getWorldPosition(parentWorldPos);
-
-    const lineGeo = new THREE.BufferGeometry().setFromPoints([parentWorldPos, worldPos]);
-    skeletonHelperGroup.add(new THREE.Line(lineGeo, lineMat));
-
-    const dot = new THREE.Mesh(boneGeo, boneMat);
-    dot.position.copy(worldPos);
-    skeletonHelperGroup.add(dot);
-  });
-
-  console.log('[SilverWolf] Bone helper built');
-}
-
-// ── UI Builder ───────────────────────────────────────────────
 function buildUI() {
   const panel = document.getElementById('panel');
-  panel.innerHTML = '';
-
-  // Title
-  const title = document.createElement('h2');
-  title.textContent = '银狼 · 骨骼驱动';
-  panel.appendChild(title);
-
-  // Reset all button
+  panel.innerHTML = '<h2 style="color:#e94560;font-size:16px;">流萤</h2>';
   const resetBtn = document.createElement('button');
-  resetBtn.textContent = '重置全部骨骼';
-  resetBtn.className = 'reset';
-  resetBtn.onclick = resetAllBones;
+  resetBtn.className = 'reset'; resetBtn.textContent = '重置全部骨骼';
+  resetBtn.onclick = () => window.__resetPose?.();
   panel.appendChild(resetBtn);
 
-  // Toggle skeleton viz
-  const vizBtn = document.createElement('button');
-  vizBtn.textContent = '切换骨骼显示';
-  vizBtn.onclick = () => {
-    skeletonHelperGroup.visible = !skeletonHelperGroup.visible;
-    vizBtn.textContent = skeletonHelperGroup.visible ? '隐藏骨骼' : '显示骨骼';
-  };
-  panel.appendChild(vizBtn);
-
-  // Reset camera button
   const camBtn = document.createElement('button');
-  camBtn.textContent = '视角归位';
-  camBtn.className = 'reset';
-  camBtn.onclick = () => {
-    controls.target.copy(camTarget);
-    camera.position.copy(camTarget).add(camOffset);
-    controls.update();
-  };
+  camBtn.className = 'reset'; camBtn.textContent = '视角归位';
+  camBtn.onclick = () => { controls.target.set(0, 2.0, 0); camera.position.set(0, 2.5, 5); controls.update(); };
   panel.appendChild(camBtn);
 
-  // Bone groups to expose
-  const groups = [
-    { name: '头部', bones: ['Head_08', 'Neck_07'] },
-    { name: '躯干', bones: ['Spine_05', 'Chest_06', 'Hips_04'] },
-    { name: '右臂', bones: ['Right_shoulder_058', 'Right_arm_059', 'Right_elbow_061', 'Right_wrist_063'] },
-    { name: '左臂', bones: ['Left_shoulder_083', 'Left_arm_084', 'Left_elbow_086', 'Left_wrist_088'] },
-    { name: '右手指', bones: [
-      'MiddleFinger1_R_064', 'MiddleFinger2_R_065', 'MiddleFinger3_R_066',
-      'IndexFinger1_R_067', 'IndexFinger2_R_068', 'IndexFinger3_R_069',
-      'Thumb0_R_070', 'Thumb1_R_071', 'Thumb2_R_072',
-      'RingFinger1_R_073', 'RingFinger2_R_074', 'RingFinger3_R_075',
-      'LittleFinger1_R_076', 'LittleFinger2_R_077', 'LittleFinger3_R_078',
-    ]},
-    { name: '左手指', bones: [
-      'MiddleFinger1_L_089', 'MiddleFinger2_L_090', 'MiddleFinger3_L_091',
-      'IndexFinger1_L_092', 'IndexFinger2_L_093', 'IndexFinger3_L_094',
-      'Thumb0_L_095', 'Thumb1_L_096', 'Thumb2_L_097',
-      'RingFinger1_L_098', 'RingFinger2_L_099', 'RingFinger3_L_0100',
-      'LittleFinger1_L_0101', 'LittleFinger2_L_0102', 'LittleFinger3_L_0103',
-    ]},
-    { name: '右腿', bones: ['Right_leg_0126', 'Right_knee_0127', 'Right_ankle_0128', 'Right_toe_0129'] },
-    { name: '左腿', bones: ['Left_leg_0131', 'Left_knee_0132', 'Left_ankle_0133', 'Left_toe_0134'] },
-    { name: '头发', bones: ['HairFA1_JNT_012','HairFA2_JNT_013','HairFA3_JNT_014','HairFB1_JNT_015','HairFB2_JNT_016','HairFB3_JNT_017','HairFC1_JNT_018','HairFC2_JNT_019','HairFC3_JNT_020','HairRA1_JNT_021','HairRA2_JNT_022','HairRA3_JNT_023','HairRB1_JNT_024','HairRB2_JNT_025','HairRB3_JNT_026','HairRB4_JNT_027','HairRC1_JNT_028','HairRC2_JNT_029','HairRC3_JNT_030','HairLA1_JNT_031','HairLA2_JNT_032','HairLA3_JNT_033','HairLB1_JNT_034','HairLB2_JNT_035','HairLB3_JNT_036','HairLC1_JNT_038','HairLC2_JNT_039','HairLD1_JNT_037','HairUA1_JNT_040','HairUA2_JNT_041','HairUA3_JNT_042','HairUB1_JNT_043','HairUB2_JNT_044','HairUB3_JNT_045'] },
-    { name: '辫子', bones: ['Bz_0_1_046','Bz_1_1_047','Bz_2_1_048','Bz_3_1_049','Bz_4_1_050','Bz_5_1_051','Bz_6_1_052','Bz_7_1_053','Bz_8_1_054','Bz_9_1_055','Bz_10_1_056','Bz_11_1_057'] },
-    { name: '裙子', bones: ['QZ_0_0_0137','QZ_0_1_0143','QZ_0_2_0149','QZ_0_3_0155','QZ_0_4_0162','QZ_0_5_00','QZ_0_6_0174','QZ_0_7_0180','QZ_0_8_0186','QZ_0_9_0189','QZ_0_10_0178','QZ_0_11_0201','QZ_0_12_0207','QZ_1_0_0138','QZ_1_1_0144','QZ_1_2_0150','QZ_1_3_0156','QZ_1_4_0163','QZ_1_5_0169','QZ_1_6_0175','QZ_1_7_0181','QZ_1_8_0187','QZ_1_9_0190','QZ_1_10_0196','QZ_1_11_0202','QZ_1_12_0208','QZ_2_0_0139','QZ_2_1_0145','QZ_2_2_0151','QZ_2_3_0157','QZ_2_4_0164','QZ_2_5_0170','QZ_2_6_0176','QZ_2_7_0182','QZ_2_8_01','QZ_2_9_0191','QZ_2_10_0197','QZ_2_11_0203','QZ_2_12_0209','QZ_3_0_0140','QZ_3_1_0146','QZ_3_2_0152','QZ_3_3_0159','QZ_3_4_0165','QZ_3_5_0171','QZ_3_6_0177','QZ_3_7_0183','QZ_3_8_02','QZ_3_9_0192','QZ_3_10_0198','QZ_3_11_0204','QZ_3_12_0210','QZ_4_4_0166','QZ_4_5_0172','QZ_4_6_0158','QZ_4_7_0184','QZ_4_8_03','QZ_4_9_0193','QZ_4_10_0199','QZ_4_11_0205','QZ_4_12_0211','QZ_5_0_0141','QZ_5_1_0147','QZ_5_2_0153','QZ_5_3_0160','QZ_5_4_0167','QZ_5_8_0188','QZ_5_9_0194','QZ_5_10_0200','QZ_5_11_0206','QZ_5_12_0212','QZ_6_0_0142','QZ_6_1_0148','QZ_6_2_0154','QZ_6_3_0161','QZ_6_4_0168','QZ_6_5_0173','QZ_6_6_0179','QZ_6_7_0185'] },
-    { name: '衣物', bones: ['QH_0_1_0217','QH_0_2_0229','QH_0_3_0241','QH_0_4_0252','QH_0_5_0262','QH_0_6_0272','QH_0_7_0280','QH_0_8_0288','QH_0_9_0275','QH_1_1_0218','QH_1_2_0230','QH_1_3_0242','QH_1_4_0253','QH_1_5_0263','QH_1_6_0273','QH_1_7_0281','QH_1_8_0289','QH_1_9_0296','QH_2_1_0219','QH_2_2_0231','QH_2_3_0243','QH_2_4_0254','QH_2_5_0264','QH_2_6_0274','QH_2_7_0282','QH_2_8_0290','QH_2_9_0297','QH_3_1_0220','QH_3_2_0232','QH_3_3_0244','QH_3_4_0235','QH_3_5_0265','QH_3_6_0255','QH_3_7_0283','QH_3_8_0291','QH_3_9_0298','QH_4_1_0221','QH_4_2_0233','QH_4_3_0245','QH_4_4_0256','QH_4_5_0266','QH_4_6_0276','QH_4_7_0284','QH_4_8_0292','QH_4_9_0299','QH_5_1_0222','QH_5_2_0234','QH_5_3_0246','QH_5_4_0257','QH_5_5_0267','QH_5_6_0277','QH_5_7_0285','QH_5_8_0293','QH_5_9_0300','QH_6_1_0223','QH_6_2_0215','QH_6_3_0247','QH_6_4_0258','QH_6_5_0268','QH_6_6_0278','QH_6_7_0286','QH_6_8_0294','QH_6_9_0301','QH_7_1_0224','QH_7_2_0236','QH_7_3_0248','QH_7_4_0259','QH_7_5_0269','QH_7_6_0279','QH_7_7_0287','QH_8_0_0213','QH_8_1_0225','QH_8_2_0237','QH_8_3_0249','QH_8_4_0260','QH_8_5_0270','QH_9_0_0214','QH_9_1_0226','QH_9_2_0238','QH_9_3_0250','QH_9_4_0261','QH_9_5_0271','QH_10_0_0195','QH_10_1_0227','QH_10_2_0239','QH_10_3_0251','QH_11_0_0216','QH_11_1_0228','QH_11_2_0240'] },
-    { name: '衣摆', bones: ['YD1_0302','YD2_0303','YD3_0304','YD4_0305','YD5_0306','YD6_0307','YD7_0308','YD8_0309','YD9_0310','YD10_0311','YD11_0312','YD12_0313','YD13_0314','YD14_0295','YD15_0315','YD16_0316','YD17_0317','LD1_0117','LD2_0118','LD3_0119','LD4_0120','LD5_0121','LD6_0122','LD7_0123','LD8_0124','LD9_0125'] },
-    { name: '配饰', bones: ['BeltA1_JNT_0114','BeltB1_JNT_0105','BeltB2_JNT_0106','BeltC1_JNT_0104','BeltD1_JNT_080','BeltD2_JNT_081','BeltE1_JNT_079','BeltF1_JNT_0107','BeltG1_JNT_082','BeltH1_JNT_0116','BeltK1_JNT_0115','ButtonA_JNT_0108','ButtonB_JNT_0109','ButtonA1_JNT_0136','BreastUpper2_L_0110','BreastUpper2_R_0111','Breast_L_0113','Breast_R_0112','Glass_JNT_011','Eye_L_010','Eye_R_09','Dao_0130','PhoneA1_JNT_0135'] },
-  ];
+  const allBones = [...boneMap.keys()].sort();
+  const groups = {};
+  allBones.forEach(name => {
+    let g = '其他';
+    if (/頭|首|目|Eye|顔|Head|head/i.test(name)) g = '头部';
+    else if (/腕|手|指|親指|人指|中指|薬指|小指|Hand|Finger|Thumb|hand|finger|thumb|wrist/i.test(name)) g = '手部';
+    else if (/肩|腕|Arm|Shoulder|Elbow|arm|shoulder|elbow|ひじ/i.test(name)) g = '手臂';
+    else if (/腰|背|脊|Spine|Hip|Chest|Waist|spine|hip|chest|waist|体/i.test(name)) g = '躯干';
+    else if (/足|脚|太もも|ひざ|つま先|Leg|Knee|Ankle|Toe|leg|knee|ankle|toe/i.test(name)) g = '腿部';
+    else if (/髪|Hair|hair/i.test(name)) g = '头发';
+    else if (/スカート|裾|Skirt|skirt|マント|衣/i.test(name)) g = '衣物';
+    else if (/Weapon|weapon|剣/i.test(name)) g = '武器';
+    else if (/翼|Wing|wing|羽/i.test(name)) g = '翅膀';
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(name);
+  });
 
-  groups.forEach((group) => {
-    const header = document.createElement('h3');
-    header.textContent = group.name;
-    header.onclick = () => {
-      const div = header.nextElementSibling;
-      if (div) div.style.display = div.style.display === 'none' ? '' : 'none';
-    };
-    panel.appendChild(header);
-
-    const container = document.createElement('div');
-    container.className = 'bone-group';
-
-    group.bones.forEach((boneName) => {
-      if (!boneMap.has(boneName)) return;
-
-      const axes = ['X', 'Y', 'Z'];
-      axes.forEach((axis) => {
-        const row = document.createElement('div');
-        row.className = 'bone-row';
-
-        const label = document.createElement('label');
-        label.textContent = (axis === 'X' ? simplifyName(boneName) : '');
-        row.appendChild(label);
-
-        const axisSpan = document.createElement('span');
-        axisSpan.className = 'axis';
-        axisSpan.textContent = axis;
-        row.appendChild(axisSpan);
-
-        const slider = document.createElement('input');
-        slider.type = 'range';
-        slider.min = -Math.PI;
-        slider.max = Math.PI;
-        slider.step = 0.01;
-        slider.value = 0;
-        slider.dataset.bone = boneName;
-        slider.dataset.axis = axis.toLowerCase();
-        row.appendChild(slider);
-
-        const valSpan = document.createElement('span');
-        valSpan.className = 'val';
-        valSpan.textContent = '0°';
-        row.appendChild(valSpan);
-
-        slider.addEventListener('input', () => {
-          const bone = boneMap.get(boneName);
-          if (!bone) return;
-          const val = parseFloat(slider.value);
-          const def = boneDefaults.get(boneName);
-          bone.rotation[axis.toLowerCase()] = def[axis.toLowerCase()] + val;
-          valSpan.textContent = Math.round(val * 180 / Math.PI) + '°';
-
-          // Update skeleton helper
-          if (skeletonHelperGroup.visible) buildBoneHelper();
-        });
-
-        container.appendChild(row);
+  ['头部','躯干','手臂','手部','腿部','头发','衣物','武器','翅膀','其他'].forEach(g => {
+    if (!groups[g]) return;
+    const h = document.createElement('h3'); h.textContent = g + ' (' + groups[g].length + ')';
+    h.onclick = () => { const d = h.nextElementSibling; if (d) d.style.display = d.style.display === 'none' ? '' : 'none'; };
+    panel.appendChild(h);
+    const div = document.createElement('div'); div.className = 'bone-group';
+    groups[g].forEach(bn => {
+      ['x','y','z'].forEach(axis => {
+        const row = document.createElement('div'); row.className = 'bone-row';
+        const lbl = document.createElement('label'); lbl.textContent = axis === 'x' ? bn.substring(0, 8) : '';
+        row.appendChild(lbl);
+        const ax = document.createElement('span'); ax.className = 'axis'; ax.textContent = axis.toUpperCase(); row.appendChild(ax);
+        const s = document.createElement('input'); s.type = 'range'; s.min = -Math.PI; s.max = Math.PI; s.step = 0.01; s.value = 0;
+        s.oninput = () => {
+          const b = boneMap.get(bn);
+          if (b) { const def = boneDefaults.get(bn); b.rotation[axis] = def[axis] + parseFloat(s.value); }
+          s.nextElementSibling.textContent = Math.round(s.value * 180 / Math.PI) + '°';
+        };
+        row.appendChild(s);
+        const v = document.createElement('span'); v.className = 'val'; v.textContent = '0°'; row.appendChild(v);
+        div.appendChild(row);
       });
     });
-
-    panel.appendChild(container);
+    panel.appendChild(div);
   });
 
-  // Info: how to use
-  const info = document.createElement('p');
-  info.style.cssText = 'font-size:10px;color:#666;margin-top:12px;line-height:1.5;';
-  info.innerHTML = '左键旋转 | 中键平移<br>滚轮缩放 | 滑块控制骨骼';
-  panel.appendChild(info);
+  document.getElementById('toggleBtn').onclick = () => {
+    panel.classList.toggle('visible');
+    document.getElementById('toggleBtn').textContent = panel.classList.contains('visible') ? '✕' : '☰';
+  };
 }
 
-function simplifyName(name) {
-  return name
-    .replace(/_/g, ' ')
-    .replace(/Right /g, 'R.')
-    .replace(/Left /g, 'L.')
-    .replace(/MiddleFinger/g, 'Mid')
-    .replace(/IndexFinger/g, 'Idx')
-    .replace(/LittleFinger/g, 'Lit')
-    .replace(/RingFinger/g, 'Rng')
-    .replace(/Finger/g, '')
-    .replace(/shoulder/g, 'Shldr')
-    .replace(/elbow/g, 'Elbw')
-    .replace(/wrist/g, 'Wrst')
-    .replace(/ankle/g, 'Ankl')
-    .replace(/knee/g, 'Knee')
-    .replace(/ _/g, ' ')
-    .trim();
-}
+setTimeout(() => {
+  document.getElementById('resetCamBtn').onclick = () => { controls.target.set(0, 2.0, 0); camera.position.set(0, 2.5, 5); controls.update(); };
+  document.getElementById('ambientSlider').oninput = function() { ambientLight.intensity = parseFloat(this.value); document.getElementById('ambientVal').textContent = this.value; };
+  document.getElementById('flyBtn').onclick = () => {
+    if (flyMode) { disableFly(); return; }
+    flyReady = !flyReady;
+    document.getElementById('flyBtn').textContent = flyReady ? '点击画面进入飞行...' : '飞行模式';
+  };
+  document.getElementById('flySpeedSlider').oninput = function() { flySpeedMul = parseFloat(this.value); document.getElementById('flySpeedVal').textContent = flySpeedMul.toFixed(1); };
+}, 1000);
 
-function resetAllBones() {
-  boneDefaults.forEach((def, name) => {
-    const bone = boneMap.get(name);
-    if (bone) {
-      bone.rotation.set(def.x, def.y, def.z);
+// === Lighting System ===
+const lights = [];
+const lightGizmos = new THREE.Group(); scene.add(lightGizmos);
+const gizmoGeo = new THREE.SphereGeometry(0.04, 16, 16);
+window.__addLight = function() {
+  var light = new THREE.PointLight(0xffeedd, 30, 8, 1);
+  light.position.set(0, 2, 1); light.castShadow = true;
+  light.shadow.mapSize.set(512, 512); scene.add(light);
+  var gizmo = new THREE.Mesh(gizmoGeo, new THREE.MeshBasicMaterial({ color: 0xffdd44, depthTest: false }));
+  gizmo.position.copy(light.position); lightGizmos.add(gizmo);
+  lights.push({ light: light, gizmo: gizmo }); updateLightList();
+};
+window.__setLightProp = function(i, prop, v) {
+  if (!lights[i]) return;
+  if (prop === 'intensity') lights[i].light.intensity = v;
+  else { lights[i].light.position[prop] = v; lights[i].gizmo.position[prop] = v; }
+};
+window.__removeLight = function(i) {
+  if (lights.length <= 1 || !lights[i]) return;
+  scene.remove(lights[i].light); lightGizmos.remove(lights[i].gizmo);
+  lights.splice(i, 1); updateLightList();
+};
+function updateLightList() {
+  var c = document.getElementById('lightList'); if (!c) return;
+  c.innerHTML = '';
+  lights.forEach(function(l, i) {
+    var div = document.createElement('div');
+    div.style.cssText = 'margin:4px 0;padding:3px 0;border-top:1px solid #444;';
+    var hdr = document.createElement('div');
+    hdr.style.cssText = 'display:flex;align-items:center;gap:2px;';
+    hdr.innerHTML = '<span style="color:#f39c12;">●</span><span style="color:#ccc;font-size:9px;">光源'+(i+1)+'</span>';
+    if (lights.length > 1) {
+      var del = document.createElement('button');
+      del.textContent = '✕'; del.style.cssText = 'font-size:8px;padding:0 3px;background:#666;margin-left:auto;';
+      del.onclick = function() { window.__removeLight(i); }; hdr.appendChild(del);
     }
+    div.appendChild(hdr);
+    ['intensity','x','y','z'].forEach(function(prop) {
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:2px;font-size:9px;';
+      var lbl = document.createElement('span');
+      lbl.style.cssText = 'color:#999;width:20px;';
+      lbl.textContent = prop === 'intensity' ? '强' : prop.toUpperCase();
+      row.appendChild(lbl);
+      var s = document.createElement('input'); s.type = 'range'; s.style.cssText = 'flex:1;accent-color:#f39c12;';
+      var v = document.createElement('span');
+      v.style.cssText = 'color:#999;width:34px;';
+      if (prop === 'intensity') {
+        s.min = '1'; s.max = '150'; s.value = String(Math.round(l.light.intensity));
+        s.oninput = function() { window.__setLightProp(i, 'intensity', +this.value); v.textContent = this.value; };
+        v.textContent = String(Math.round(l.light.intensity));
+      } else {
+        s.min = '-3'; s.max = '3'; s.step = '0.05'; s.value = l.light.position[prop].toFixed(2);
+        s.oninput = function() { window.__setLightProp(i, prop, +this.value); v.textContent = parseFloat(this.value).toFixed(2); };
+        v.textContent = l.light.position[prop].toFixed(2);
+      }
+      row.appendChild(s);
+      row.appendChild(v);
+      div.appendChild(row);
+    });
+    c.appendChild(div);
   });
-  // Reset all sliders
-  document.querySelectorAll('input[type="range"]').forEach((s) => {
-    s.value = 0;
-    const valSpan = s.parentElement?.querySelector('.val');
-    if (valSpan) valSpan.textContent = '0°';
-  });
-  if (skeletonHelperGroup.visible) buildBoneHelper();
-  console.log('[SilverWolf] All bones reset');
 }
-
-// ── Render loop ──────────────────────────────────────────────
+document.getElementById('addLightBtn').onclick = function() { window.__addLight(); };
 function animate() {
   requestAnimationFrame(animate);
-  const dt = Math.min(flyClock.getDelta(), 0.1); // cap to avoid jumps
-
+  const dt = Math.min(flyClock.getDelta(), 0.1);
   if (flyMode) {
     const speed = (keys.shift ? 4 : 1.6) * flySpeedMul;
     const dir = new THREE.Vector3();
@@ -536,128 +242,16 @@ function animate() {
     if (keys.d) camera.getWorldDirection(dir), dir.cross(camera.up).normalize(), camera.position.addScaledVector(dir, speed * dt);
     if (keys.q) camera.position.y -= speed * dt;
     if (keys.e) camera.position.y += speed * dt;
-  } else {
-    controls.update();
-  }
-
-  // Wave animation
-  if (animating) {
-    animTime += dt;
-    const wave = Math.sin(animTime * 6); // ~1Hz oscillation
-    const pose = (n, x, y, z) => {
-      const b = boneMap.get(n);
-      if (b) { if (x != null) b.rotation.x = x; if (y != null) b.rotation.y = y; if (z != null) b.rotation.z = z; }
-    };
-    // Oscillate elbow bend and wrist
-    pose('Left_elbow_086', 0.4 + wave * 0.15, 0, 0.6);
-    pose('Left_wrist_088', 0, 2.0 + wave * 0.3, 0);
-    // Slight shoulder bob
-    pose('Left_shoulder_083', 0.6 + wave * 0.05, -0.3, -0.8 + wave * 0.08);
-  }
-
+  } else { controls.update(); }
+  if (mmdModel) mmdModel.update(dt);
   renderer.render(scene, camera);
 }
-
-// ── Resize ───────────────────────────────────────────────────
 function resize() {
-  const viewer = document.getElementById('viewer');
-  const w = viewer.clientWidth;
-  const h = viewer.clientHeight;
-  renderer.setSize(w, h, true);
-  camera.aspect = w / Math.max(h, 1);
+  const v = document.getElementById('viewer');
+  renderer.setSize(v.clientWidth, v.clientHeight, false);
+  camera.aspect = v.clientWidth / Math.max(v.clientHeight, 1);
   camera.updateProjectionMatrix();
 }
 window.addEventListener('resize', resize);
 resize();
-
-// ── Lighting System ────────────────────────────────────────────
-const lights = [];
-const lightGizmos = new THREE.Group();
-scene.add(lightGizmos);
-const gizmoGeo = new THREE.SphereGeometry(0.04, 16, 16);
-
-function addPointLight(x, y, z) {
-  const light = new THREE.PointLight(0xffeedd, 30, 8, 1);
-  light.position.set(x, y || 2, z || 0);
-  light.castShadow = true;
-  light.shadow.mapSize.set(512, 512);
-  light.shadow.camera.near = 0.1;
-  light.shadow.camera.far = 20;
-  light.shadow.bias = -0.002;
-  scene.add(light);
-
-  const gizmo = new THREE.Mesh(gizmoGeo, new THREE.MeshBasicMaterial({ color: 0xffdd44, depthTest: false }));
-  gizmo.position.copy(light.position);
-  lightGizmos.add(gizmo);
-
-  lights.push({ light, gizmo });
-  updateLightList();
-  return { light, gizmo };
-}
-
-function removeLight(index) {
-  if (lights.length <= 1) return;
-  const { light, gizmo } = lights[index];
-  scene.remove(light);
-  lightGizmos.remove(gizmo);
-  if (gizmo.material) gizmo.material.dispose();
-  lights.splice(index, 1);
-  updateLightList();
-}
-
-function updateLightList() {
-  const container = document.getElementById('lightList');
-  if (!container) return;
-  container.innerHTML = lights.map((l, i) => `
-    <div style="margin:4px 0;padding:3px 0;border-top:1px solid #444;">
-      <div style="display:flex;align-items:center;gap:2px;">
-        <span style="color:#f39c12;">●</span>
-        <span style="color:#ccc;font-size:9px;">光源${i+1}</span>
-        ${lights.length > 1 ? `<button style="font-size:8px;padding:0 3px;background:#666;margin-left:auto;" onclick="window.__removeLight(${i})">✕</button>` : ''}
-      </div>
-      <div style="display:flex;align-items:center;gap:2px;font-size:9px;">
-        <span style="color:#999;width:20px;">强</span>
-        <input type="range" min="1" max="150" value="${Math.round(l.light.intensity)}" style="flex:1;accent-color:#f39c12;"
-          oninput="window.__setLightProp(${i},'intensity',+this.value);this.nextElementSibling.textContent=this.value">
-        <span style="color:#999;width:26px;">${Math.round(l.light.intensity)}</span>
-      </div>
-      ${['x','y','z'].map(axis => `
-      <div style="display:flex;align-items:center;gap:2px;font-size:9px;">
-        <span style="color:#999;width:20px;">${axis.toUpperCase()}</span>
-        <input type="range" min="-3" max="3" step="0.05" value="${l.light.position[axis].toFixed(2)}" style="flex:1;accent-color:#f39c12;"
-          oninput="window.__setLightProp(${i},'${axis}',+this.value);this.nextElementSibling.textContent=parseFloat(this.value).toFixed(2)">
-        <span style="color:#999;width:34px;">${l.light.position[axis].toFixed(2)}</span>
-      </div>`).join('')}
-    </div>
-  `).join('');
-}
-
-window.__setLightProp = (i, prop, v) => {
-  if (!lights[i]) return;
-  if (prop === 'intensity') {
-    lights[i].light.intensity = v;
-  } else {
-    lights[i].light.position[prop] = v;
-    lights[i].gizmo.position[prop] = v;
-  }
-};
-window.__addLight = () => addPointLight(0, 2, 1);
-window.__removeLight = (i) => removeLight(i);
-
-// Wire up ambient light slider
-document.getElementById('ambientSlider').oninput = function() {
-  ambientLight.intensity = parseFloat(this.value);
-  document.getElementById('ambientVal').textContent = this.value;
-};
-
-// Wire addLightBtn
-document.getElementById('addLightBtn').onclick = () => window.__addLight();
-
-// Show light panel on load
-document.getElementById('lightPanel').style.display = '';
-
-console.log('[Light] System ready with shadows');
-// ────────────────────────────────────────────────────────────────
-
 animate();
-console.log('[SilverWolf] App started. Open DevTools console for logs.');
