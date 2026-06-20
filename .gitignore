@@ -1,0 +1,17 @@
+node_modules/
+dist/
+
+# Tauri build artifacts
+src-tauri/target/
+
+# Temporary files
+*.mjs
+!vite.config.js
+*.png
+!SilverWolf/**/*.png
+!Firefly/**/*.png
+!src-tauri/icons/*.png
+
+# Installer (too large for git, use releases)
+SilverWolf-3D-Driver-Setup.exe
+*.msi
